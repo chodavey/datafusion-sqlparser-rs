@@ -18,6 +18,7 @@
 mod ansi;
 mod bigquery;
 mod clickhouse;
+mod cypher;
 mod databricks;
 mod duckdb;
 mod generic;
@@ -39,6 +40,7 @@ use log::debug;
 pub use self::ansi::AnsiDialect;
 pub use self::bigquery::BigQueryDialect;
 pub use self::clickhouse::ClickHouseDialect;
+pub use self::cypher::CypherDialect;
 pub use self::databricks::DatabricksDialect;
 pub use self::duckdb::DuckDbDialect;
 pub use self::generic::GenericDialect;
