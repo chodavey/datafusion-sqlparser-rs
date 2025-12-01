@@ -79,7 +79,7 @@ fn parse_cypher_return_count(
 ) -> Result<Statement, ParserError> {
     use Token::*;
 
-    // COUNT (p) AS alias [LIMIT n]
+    // COUNT (p) [AS alias] [LIMIT n]
     let next = parser.peek_token();
     if let Word(w) = &next.token {
         if w.keyword != Keyword::COUNT {
@@ -106,14 +106,14 @@ fn parse_cypher_return_count(
         ));
     }
 
-    // AS alias
-    if !parser.parse_keyword(Keyword::AS) {
-        return Err(ParserError::ParserError(
-            "Expected AS in RETURN clause".into(),
-        ));
-    }
-    let alias_ident = parser.parse_identifier()?;
-    let alias = alias_ident.value.clone();
+    // AS alias (optional)
+    let alias = if parser.parse_keyword(Keyword::AS) {
+        let alias_ident = parser.parse_identifier()?;
+        alias_ident.value.clone()
+    } else {
+        // default when user writes: MATCH (p) RETURN count(p);
+        "count".to_string()
+    };
 
     // Optional LIMIT n
     let mut limit_sql = String::new();
@@ -168,14 +168,13 @@ fn parse_cypher_return_props(
     let mut select_items: Vec<String> = Vec::new();
 
     loop {
-        // Decide which expression this is:
-        // labels(p) [AS alias]
-        // p.name    [AS alias]
         let next = parser.peek_token();
 
-        // labels(p)
-        if let Word(w) = &next.token {
-            if w.keyword == Keyword::NoKeyword && w.value.eq_ignore_ascii_case("labels") {
+        match &next.token {
+            // labels(p) [AS alias]
+            Word(w)
+                if w.keyword == Keyword::NoKeyword && w.value.eq_ignore_ascii_case("labels") =>
+            {
                 parser.next_token(); // consume 'labels'
 
                 parser.expect_token(&LParen)?;
@@ -199,16 +198,93 @@ fn parse_cypher_return_props(
                 // labels(p) -> p.label (single label)
                 let expr_sql = format!("{var}.label AS {alias}");
                 select_items.push(expr_sql);
-            } else {
-                // p.name [AS alias]
-                // p.age  [AS alias]
-                let expr_sql = parse_var_prop_as_alias(parser, &var)?;
-                select_items.push(expr_sql);
             }
-        } else {
-            return Err(ParserError::ParserError(
-                "Unexpected token in RETURN clause".into(),
-            ));
+
+            // Either p.prop [AS alias]  OR  bare p [AS alias]
+            Word(_) => {
+                // consume the identifier (should be the MATCH var)
+                let var_ident = parser.parse_identifier()?;
+                let var_name = var_ident.value.clone();
+
+                if var_name != var {
+                    return Err(ParserError::ParserError(
+                        "Only simple p, labels(p), or p.prop expressions are supported in RETURN clause"
+                            .into(),
+                    ));
+                }
+
+                // Look at what comes after 'p'
+                // Clone the token so we don't hold a reference into the parser's buffer.
+                let after_tok = parser.peek_token().token.clone();
+
+                match after_tok {
+                    // p.prop [AS alias]
+                    Period => {
+                        parser.next_token(); // consume '.'
+
+                        let prop_ident = parser.parse_identifier()?;
+                        let prop_name = prop_ident.value.clone();
+
+                        // Optional AS alias
+                        let mut alias = prop_name.clone();
+                        if parser.parse_keyword(Keyword::AS) {
+                            let alias_ident = parser.parse_identifier()?;
+                            alias = alias_ident.value.clone();
+                        }
+
+                        let expr_sql = format!(
+                            "json_extract({var_name}.properties, '$.{prop_name}') AS {alias}"
+                        );
+                        select_items.push(expr_sql);
+                    }
+
+                    // Bare node: p [AS alias]
+                    // e.g., MATCH (p:Person) RETURN p;
+                    // or   MATCH (p:Person) RETURN p AS person;
+                    Word(w) if w.keyword == Keyword::AS => {
+                        // consume AS
+                        let _ = parser.parse_keyword(Keyword::AS);
+                        let alias_ident = parser.parse_identifier()?;
+                        let alias = alias_ident.value.clone();
+
+                        let expr_sql = format!(
+                            "json_object('id', {var_name}.id, 'label', {var_name}.label, 'properties', {var_name}.properties) AS {alias}"
+                        );
+                        select_items.push(expr_sql);
+                    }
+
+                    // Bare node followed by LIMIT (handle LIMIT after the loop)
+                    Word(w) if w.keyword == Keyword::LIMIT => {
+                        let alias = var_name.clone();
+                        let expr_sql = format!(
+                            "json_object('id', {var_name}.id, 'label', {var_name}.label, 'properties', {var_name}.properties) AS {alias}"
+                        );
+                        select_items.push(expr_sql);
+                    }
+
+                    // Bare node at end of list / statement: ',', ';', EOF
+                    Comma | SemiColon | EOF => {
+                        let alias = var_name.clone();
+                        let expr_sql = format!(
+                            "json_object('id', {var_name}.id, 'label', {var_name}.label, 'properties', {var_name}.properties) AS {alias}"
+                        );
+                        select_items.push(expr_sql);
+                    }
+
+                    _ => {
+                        return Err(ParserError::ParserError(
+                            "Unexpected token after variable in RETURN clause; expected '.', AS, ',', or LIMIT"
+                                .into(),
+                        ));
+                    }
+                }
+            }
+
+            _ => {
+                return Err(ParserError::ParserError(
+                    "Unexpected token in RETURN clause".into(),
+                ));
+            }
         }
 
         // If next token is a comma, continue loop
@@ -261,32 +337,4 @@ fn parse_cypher_return_props(
     }
 
     Ok(stmts.remove(0))
-}
-
-fn parse_var_prop_as_alias(parser: &mut Parser, expected_var: &str) -> Result<String, ParserError> {
-    use Token::*;
-
-    // Parse: p.name [AS alias]
-    let var_ident = parser.parse_identifier()?;
-    let var_name = var_ident.value.clone();
-
-    if var_name != expected_var {
-        return Err(ParserError::ParserError(
-            "Only simple p.prop expressions are supported in RETURN clause".into(),
-        ));
-    }
-
-    parser.expect_token(&Period)?;
-
-    let prop_ident = parser.parse_identifier()?;
-    let prop_name = prop_ident.value.clone();
-
-    // Optional AS alias
-    let mut alias = prop_name.clone();
-    if parser.parse_keyword(Keyword::AS) {
-        let alias_ident = parser.parse_identifier()?;
-        alias = alias_ident.value.clone();
-    }
-
-    Ok(format!("{var_name}.{prop_name} AS {alias}"))
 }

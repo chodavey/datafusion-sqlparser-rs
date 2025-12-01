@@ -16,6 +16,21 @@ fn cypher_match_count_unlabeled() {
 }
 
 #[test]
+fn cypher_match_count_unlabeled_default_alias() {
+    let dialect = CypherDialect::default();
+    let mut parser = Parser::new(&dialect)
+        .try_with_sql("MATCH (p) RETURN count(p);")
+        .unwrap();
+
+    let mut stmts = parser.parse_statements().unwrap();
+    assert_eq!(stmts.len(), 1);
+    let sql = stmts.remove(0).to_string();
+
+    // default alias should be "count"
+    assert_eq!(sql, "SELECT COUNT(*) AS count FROM nodes AS p");
+}
+
+#[test]
 fn cypher_match_count_labeled() {
     let dialect = CypherDialect::default();
     let mut parser = Parser::new(&dialect)
@@ -33,6 +48,37 @@ fn cypher_match_count_labeled() {
 }
 
 #[test]
+fn cypher_match_count_labeled_default_alias() {
+    let dialect = CypherDialect::default();
+    let mut parser = Parser::new(&dialect)
+        .try_with_sql("MATCH (p:Person) RETURN count(p);")
+        .unwrap();
+
+    let mut stmts = parser.parse_statements().unwrap();
+    assert_eq!(stmts.len(), 1);
+    let sql = stmts.remove(0).to_string();
+
+    assert_eq!(
+        sql,
+        "SELECT COUNT(*) AS count FROM nodes AS p WHERE p.label = 'Person'"
+    );
+}
+
+#[test]
+fn cypher_match_count_unlabeled_limit_default_alias() {
+    let dialect = CypherDialect::default();
+    let mut parser = Parser::new(&dialect)
+        .try_with_sql("MATCH (p) RETURN count(p) LIMIT 5;")
+        .unwrap();
+
+    let mut stmts = parser.parse_statements().unwrap();
+    assert_eq!(stmts.len(), 1);
+    let sql = stmts.remove(0).to_string();
+
+    assert_eq!(sql, "SELECT COUNT(*) AS count FROM nodes AS p LIMIT 5");
+}
+
+#[test]
 fn cypher_match_props_labeled_limit() {
     let dialect = CypherDialect::default();
     let mut parser = Parser::new(&dialect)
@@ -45,7 +91,9 @@ fn cypher_match_props_labeled_limit() {
 
     assert_eq!(
         sql,
-        "SELECT p.name AS name, p.age AS age FROM nodes AS p WHERE p.label = 'Person' LIMIT 10"
+        "SELECT json_extract(p.properties, '$.name') AS name, \
+        json_extract(p.properties, '$.age') AS age \
+        FROM nodes AS p WHERE p.label = 'Person' LIMIT 10"
     );
 }
 
@@ -64,6 +112,76 @@ fn cypher_match_labels_and_props_unlabeled_limit() {
 
     assert_eq!(
         sql,
-        "SELECT p.label AS labels, p.name AS name, p.age AS age FROM nodes AS p LIMIT 10"
+        "SELECT p.label AS labels, \
+        json_extract(p.properties, '$.name') AS name, \
+        json_extract(p.properties, '$.age') AS age \
+        FROM nodes AS p LIMIT 10"
+    );
+}
+
+#[test]
+fn cypher_match_return_node_unlabeled() {
+    let dialect = CypherDialect::default();
+    let mut parser = Parser::new(&dialect)
+        .try_with_sql("MATCH (p) RETURN p;")
+        .unwrap();
+
+    let mut stmts = parser.parse_statements().unwrap();
+    assert_eq!(stmts.len(), 1);
+    let sql = stmts.remove(0).to_string();
+
+    // Should select a JSON node column
+    assert!(sql.starts_with("SELECT"));
+    assert!(sql.contains("json_object"));
+    assert!(sql.contains("FROM nodes AS p"));
+}
+
+#[test]
+fn cypher_match_return_node_labeled() {
+    let dialect = CypherDialect::default();
+    let mut parser = Parser::new(&dialect)
+        .try_with_sql("MATCH (p:Person) RETURN p AS person;")
+        .unwrap();
+
+    let mut stmts = parser.parse_statements().unwrap();
+    assert_eq!(stmts.len(), 1);
+    let sql = stmts.remove(0).to_string();
+
+    // Should select a JSON node column aliased as `person` and filter by label
+    assert!(sql.starts_with("SELECT"));
+    assert!(sql.contains("json_object"));
+    assert!(sql.contains("AS person"));
+    assert!(sql.contains("FROM nodes AS p WHERE p.label = 'Person'"));
+}
+
+#[test]
+fn cypher_match_count_mismatched_var_errors() {
+    let dialect = CypherDialect::default();
+    let mut parser = Parser::new(&dialect)
+        .try_with_sql("MATCH (p) RETURN count(q);")
+        .unwrap();
+
+    let res = parser.parse_statements();
+    assert!(res.is_err());
+    let err = res.unwrap_err().to_string();
+    assert!(
+        err.contains("COUNT() variable must match MATCH() variable"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn cypher_match_labels_mismatched_var_errors() {
+    let dialect = CypherDialect::default();
+    let mut parser = Parser::new(&dialect)
+        .try_with_sql("MATCH (p) RETURN labels(q);")
+        .unwrap();
+
+    let res = parser.parse_statements();
+    assert!(res.is_err());
+    let err = res.unwrap_err().to_string();
+    assert!(
+        err.contains("labels() variable must match MATCH() variable"),
+        "unexpected error: {err}"
     );
 }
